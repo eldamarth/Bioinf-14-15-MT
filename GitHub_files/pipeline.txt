@@ -1,0 +1,83 @@
+### Analysis workflow
+### Description of the commands, functions and programs used.
+### 'path/to/' is abbreviated by '/'.
+
+ba = __import__('basic')
+cm = __import__('call_manip')
+psE = __import__('postsnpEff')
+cjm = __import__('write_calls4joinmap')
+
+##################################################
+### Acquisition of inputs/preparation of analysis
+##################################################
+
+### Provided files.
+.CEL and .ARR microarray data for fragaria species and cultivars.
+SNP map of F. x ananassa > map.txt
+F. vesca genomes and annotations > Fv1.1.fa, genes.gff, Fvb_genome.fas
+Annotation file of IStraw90 > IStraw90_annotation.r1.csv
+
+### Generation of custom annotation file.
+$ ba.write_snpfa('/IStraw90_annotation.r1.csv, outPath) > snp_seqs.fa
+$ makeblastdb -in Fvb_genome.fas -dbtype nucl
+$ blastn -out snp_seqs_blasted.output -outfmt "6 std qseq sseq" -query /snp_seqs.fa -db /Fvb_genome.fas -evalue 0.01 -max_target_seqs 1
+$ awk '{if ($3 > 97.5){print $0}}' snp_seqs_blasted.output |  awk '{if($10-$9>0){print $1 "\t" $2 "\t" $9+35}else{print $1 "\t" $2 "\t" $9-35}}' | sort > filt_Fv2.0_coord.txt
+$ echo -e "probeset_id\tAffyID\tType\tLG\tLGpos\tFvb\tFvbpos\tFlank\tAlleleA\tAlleleB\n$( grep -v '#' IStraw90_annotation.r1.csv | awk 'BEGIN{FS=","; OFS="\t";}{match($0,/\"(\w+)_LG/, arr); print $1, $2, arr[1], $4, $5, $7, $8, $9}' | sed 's/\"//g' | sort | join -t$'\t' -o 0 1.2 1.3 1.4 1.5 2.2 2.3 1.5 1.6 1.7 1.8 - filt_Fv2.0_coord.txt )" > iStrawAnnot.txt
+
+### Generation of fasta file with Fv1.1 transcripts.
+$ samtools faidx /Fv1.1.fa
+$ gffread /genes.gff -g /Fv1.1.fa -x Fv1_transcripts.fa
+
+### Preparation of snpEff v1.1 database.
+## Add to snpEff.config:
+# Strawberry genome, version v1.1
+Fv1.1.genome : Fragaria_vesca
+Fv1.1.reference : http://www.rosaceae.org/species/fragaria/fragaria_vesca/genome_v1.1
+## Create dirs:
+/snpEff/data/genomes/Fv1.1.fa
+/snpEff/data/Fv1.1/genes.gff
+$ java -jar -Xmx1g snpEff.jar build -gff3 -v Fv1.1
+
+### Genotyping and classification.
+Genotyping-Console <(.CELL/.ARR files) > AxiomGT1.calls.txt
+SNPolisher <(output files from GC) > PolyHighResolution.ps
+
+##################################################
+### Analysis of SNPs
+##################################################
+
+### Preparation of calls files.
+$ join <(cut -f1 /iStrawAnnot.txt | dos2unix ) <( cat /PolyHighResolution.ps | dos2unix) > PHfilt.ps
+cm.PHvar_calls('/PHfilt.ps', '/AxiomGT1.calls.txt', outPath) > polyhigh.calls.txt
+cm.join_dupl_calls('/polyhigh.calls.txt', outPath) > jmPHcalls.txt, clPHcalls.txt, nonsegSNPs.txt
+
+### Construction of cultivars distance tree.
+ba.write_subfile('/map.txt', '/clPHcalls.txt', outPath, 'clCore.calls.txt')
+ba.write_calls4tassel('/clCore.calls.txt') > clCore.calls4Tass.txt
+Tassel 4.3.1 <(clCore.calls4Tass.txt) > Fragaria_tree.nwk
+MEGA 6.0 <(Fragaria_tree.nwk)
+
+### Construction of genetic maps.
+cm.prepare_calls4clustering('/iStrawAnnot.txt', '/map.txt', '/jmPHcalls.txt', outdir) > LGn.txt, Fvbn.txt, coreLGmismatch.txt, stats.txt
+$ perl SNPC.pl --rootdir "/" --PHfile "Fvb#.txt" --SNPfile "LG#.txt"  --groups 7 --percent 90 --nind 42 > /LGn/perc/clusterout.txt, unclusterout.txt
+cjm.start(/) <('(un)clusterout.txt') > LGNperc.txt (calls), difHG.txt, phasing.txt, stats.txt
+JoinMap 4.1 <('LGNperc.txt') > jm_step1.txt
+cm.rephase_calls(indir='/') > calls4step2.txt, phasing_2.txt
+JoinMap 4.1 <('jm_step1.txt') > jm_step2.txt
+cm.mapstats(indir='/') > jm_stats.txt, jm_fragments.txt
+
+### Prediction of effects of SNPs.
+ba.write_vcf('/iStrawAnnot.txt', outPath, outfile='Fv1.1.vcf') 
+ba.write_subfile(listfile='/PHfilt.ps', file='/Fv1.1.vcf', outPath, outFile='v1PH.vcf', header=False, f1=1, f2=3, printcomments=True)
+$ java -Xmx1g -jar "/snpEff.jar" -v Fv1.1 v1PH.vcf > v1PHsnpEff.vcf
+
+### Annotation of genes affected by high effect SNPs.
+psE.write_subfasta(snpEff_vcf='/v1PHsnpEff.vcf', fastafile='/Fv1_transcripts.fa', outPath, outFile='PHhigh.fa', tag='HIGH') > PHhigh.fa
+CLC Genomics Workbench 8.0 <(PHhigh.fa), blastx against swissprot > blast_table.txt
+psE.annotate_genes('/v1PHsnpEff.vcf', '/blast_table.txt', tag='HIGH', paths=True) > annotation.txt
+
+### Visualization of SNPs with high impact effect.
+psE.write_calls_by_eff(snpEff_vcf='/v1PHsnpEff.vcf', callsfile='/jmPHcalls.txt', outPath) > HIGHEffPH.calls.txt
+MeV v4.9 <(HIGHEffPH.calls.txt) > heatmap
+o.write_mapchart_input(snpEff_vcf='/v1PHsnpEff.vcf', outPath, outfile='highmapchart.map', tag='HIGH')
+MapChart 2.1 <('highmapchart.map')
